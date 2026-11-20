@@ -7,8 +7,13 @@ import org.jetbrains.kotlin.gradle.dsl.KotlinAndroidProjectExtension
 internal fun Project.configureAndroidCommon(
     commonExtension: CommonExtension<*, *, *, *, *, *>,
 ) {
+    val compileSdkVersion = providers.gradleProperty("avcrt.compileSdk")
+        .orNull
+        ?.toIntOrNull()
+        ?: libs.versionInt("compileSdk")
+
     commonExtension.apply {
-        compileSdk = libs.versionInt("compileSdk")
+        compileSdk = compileSdkVersion
 
         defaultConfig {
             minSdk = libs.versionInt("minSdk")

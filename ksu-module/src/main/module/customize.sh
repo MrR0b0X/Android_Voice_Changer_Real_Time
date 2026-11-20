@@ -9,7 +9,9 @@
 
 ui_print "  AVCRT — system-wide voice changer"
 ui_print "  • All apps (Zygisk): works everywhere"
-ui_print "  • Cellular calls: needs the AVCRT-patched kernel"
+ui_print "  • Cellular calls: requires a matching AVCRT-patched audio kernel"
+ui_print "  • Supported cards: litomtpsndcard (lito-mtp-snd-card), lahainayupikidp (lahaina-yupikidp-snd-card)"
+ui_print "  • Cellular routing remains experimental"
 
 set_perm_recursive "$MODPATH" 0 0 0755 0644
 set_perm "$MODPATH/bin/avcrtd"        0 0 0755

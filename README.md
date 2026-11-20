@@ -11,6 +11,13 @@ mic / voice_communication / voice_call source.
 > should expect to tune the effect descriptor & `audio_effects.xml` overlay for your
 > specific device's audio HAL.
 
+The app-level Zygisk microphone capture path works on 64-bit Android without a device-specific
+kernel patch. Cellular routing recognizes ALSA card IDs `litomtpsndcard` (`lito-mtp-snd-card`)
+and `lahainayupikidp` (`lahaina-yupikidp-snd-card`). The Lahaina/Yupik configuration in the
+referenced kernel source enables Bolero TX macros and includes AVCRT decimator-mute and
+CVP-rebuild controls.
+Cellular call replacement still needs handset validation, so treat that route as experimental.
+
 ---
 
 ## Project layout
@@ -112,12 +119,30 @@ gradle wrapper --gradle-version 8.10.2
 ### Build the app
 
 ```sh
-./gradlew :app:assembleDebug
+./build_avcrtd.sh
 ```
 
+The script defaults to compile SDK API 34. Enter another supported API level when
+prompted, or pass it directly with `./build_avcrtd.sh --compile-sdk 35`. The script
+downloads the selected Android platform and the required build tools, NDK, and CMake
+through `sdkmanager`, then builds the APK and KernelSU/Magisk module and prints their
+SHA-256 checksums. `ANDROID_HOME` or `ANDROID_SDK_ROOT` must point to an SDK with the
+Android command-line tools installed.
+The **Build AVCRT APK** GitHub Actions workflow runs on pull requests and manual
+dispatches; it uploads the APK, module ZIP, and checksum file as a
+14-day workflow artifact. Manual runs let you type the Android compile SDK API
+level; the workflow validates it and downloads that platform automatically
+(default 34). This Android Gradle Plugin version supports through API 35.
+
+Manual runs also include an optional Telegram delivery choice, off by default.
+To enable it, add `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` as repository
+Actions secrets, then select **Send the APK to Telegram** when starting a run.
+Only the APK is sent; uploads larger than Telegram's 50 MB Bot API limit fail
+with a clear message.
+
 The first build will:
-1. Compile `libavcrtfx.so` for arm64-v8a / armeabi-v7a / x86_64
-2. Assemble the KSU module zip from `ksu-module/src/main/module/*` + the .so files
+1. Compile the native daemon and capture hooks for the supported Android ABIs
+2. Assemble the KSU module zip from `ksu-module/src/main/module/*` and the native outputs
 3. Drop it into `app/src/main/assets/avcrt-module.zip` (sha256 logged)
 4. Compile and package the APK
 

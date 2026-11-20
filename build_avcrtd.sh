@@ -1,42 +1,72 @@
-#!/bin/bash
-# Standalone build of the avcrtd daemon (arm64) — reconstructed from the cached CMake deps.
-# Output: /tmp/afhook_build/avcrtd  (self-contained, -static-libstdc++).
-set -u
-NDK=/home/niftox/Android/Sdk/ndk/27.0.12077973
-BIN=$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin
-CXX=$BIN/aarch64-linux-android30-clang++
-CC=$BIN/aarch64-linux-android30-clang
-ROOT=/home/niftox/avcrt/ksu-module
-SRC=$ROOT/src/main/cpp
-ST=$ROOT/.cxx/RelWithDebInfo/h3l6c6h2/arm64-v8a/_deps/soundtouch-src
-TA=$ROOT/.cxx/Debug/4g5j6w72/arm64-v8a/_deps/tinyalsa-src
-JSON=$ROOT/.cxx/RelWithDebInfo/h3l6c6h2/arm64-v8a/_deps/nlohmann_json-src/include
-OUT=/tmp/afhook_build
-rm -rf "$OUT"; mkdir -p "$OUT"
-fail() { echo "BUILD FAILED: $1"; exit 1; }
+#!/usr/bin/env bash
+# Build the AVCRT debug APK and its bundled KernelSU/Magisk module.
+set -euo pipefail
 
-echo "== tinyalsa (.c) =="
-for f in mixer mixer_hw mixer_plugin pcm pcm_hw pcm_plugin snd_utils; do
-  $CC -c "$TA/$f.c" -I"$TA/include" -O2 -Wno-macro-redefined -Wno-unused-parameter \
-      -o "$OUT/ta_$f.o" || fail "tinyalsa $f"
+PROJECT_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+cd "$PROJECT_ROOT"
+
+if [[ ! -x ./gradlew ]]; then
+  echo "Gradle wrapper is missing or not executable: $PROJECT_ROOT/gradlew" >&2
+  exit 1
+fi
+
+SDK_ROOT="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-}}"
+if [[ -z "$SDK_ROOT" ]]; then
+  echo "Set ANDROID_HOME or ANDROID_SDK_ROOT to an Android SDK installation." >&2
+  exit 1
+fi
+export ANDROID_SDK_ROOT="$SDK_ROOT"
+export ANDROID_HOME="$SDK_ROOT"
+
+COMPILE_SDK="${ANDROID_COMPILE_SDK:-34}"
+if [[ $# -gt 0 ]]; then
+  if [[ $# -eq 2 && "$1" == "--compile-sdk" ]]; then
+    COMPILE_SDK="$2"
+  else
+    echo "Usage: $0 [--compile-sdk API]" >&2
+    exit 2
+  fi
+elif [[ -t 0 ]]; then
+  read -r -p "Android compile SDK API [$COMPILE_SDK]: " entered_sdk
+  COMPILE_SDK="${entered_sdk:-$COMPILE_SDK}"
+fi
+
+case "$COMPILE_SDK" in
+  34|35) ;;
+  *)
+    echo "Unsupported Android compile SDK: $COMPILE_SDK (choose 34 or 35)." >&2
+    exit 1
+    ;;
+esac
+export ANDROID_COMPILE_SDK="$COMPILE_SDK"
+
+if command -v sdkmanager >/dev/null 2>&1; then
+  SDKMANAGER="$(command -v sdkmanager)"
+elif [[ -x "$SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" ]]; then
+  SDKMANAGER="$SDK_ROOT/cmdline-tools/latest/bin/sdkmanager"
+else
+  echo "Android sdkmanager is missing. Install Android command-line tools first." >&2
+  exit 1
+fi
+
+"$SDKMANAGER" --sdk_root="$SDK_ROOT" --install \
+  "platforms;android-$COMPILE_SDK" \
+  "build-tools;34.0.0" \
+  "ndk;26.3.11579264" \
+  "cmake;3.22.1"
+
+./gradlew --no-daemon --stacktrace -Pavcrt.compileSdk="$COMPILE_SDK" :app:assembleDebug
+
+APK="$PROJECT_ROOT/app/build/outputs/apk/debug/app-debug.apk"
+MODULE="$PROJECT_ROOT/ksu-module/build/outputs/avcrt-module.zip"
+
+for artifact in "$APK" "$MODULE"; do
+  if [[ ! -s "$artifact" ]]; then
+    echo "Expected build artifact was not produced: $artifact" >&2
+    exit 1
+  fi
+  sha256sum "$artifact"
 done
 
-echo "== SoundTouch (.cpp) =="
-for f in "$ST"/source/SoundTouch/*.cpp; do
-  $CXX -c "$f" -I"$ST/include" -I"$ST/source/SoundTouch" -O2 -std=c++17 -fPIC \
-       -o "$OUT/st_$(basename "$f" .cpp).o" || fail "soundtouch $(basename "$f")"
-done
-
-echo "== avcrt engine/config/log + daemon =="
-INC="-I$SRC/src -I$ST/include -I$JSON -I$TA/include"
-$CXX -c "$SRC/src/avcrt_engine.cpp" $INC -O2 -std=c++17 -o "$OUT/avcrt_engine.o" || fail "engine"
-$CXX -c "$SRC/src/avcrt_config.cpp" $INC -O2 -std=c++17 -o "$OUT/avcrt_config.o" || fail "config"
-$CXX -c "$SRC/src/avcrt_log.cpp"    $INC -O2 -std=c++17 -o "$OUT/avcrt_log.o"    || fail "log"
-$CXX -c "$SRC/daemon/avcrtd.cpp"    $INC -O2 -std=c++17 -Wall -Wextra -Wno-unused-parameter \
-     -o "$OUT/avcrtd.o" || fail "avcrtd.cpp"
-
-echo "== link =="
-$CXX "$OUT"/*.o -static-libstdc++ -llog -o "$OUT/avcrtd" || fail "link"
-echo "OK -> $OUT/avcrtd"
-file "$OUT/avcrtd"
-ls -la "$OUT/avcrtd"
+echo "APK: $APK"
+echo "Module: $MODULE"

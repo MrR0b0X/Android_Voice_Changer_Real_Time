@@ -1,0 +1,99 @@
+name: Build AVCRT APK
+
+on:
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      compile_sdk:
+        description: Type the Android API level to compile against (for example, 34 or 35)
+        type: string
+        default: '34'
+        required: true
+      send_to_telegram:
+        description: Send the APK to Telegram
+        type: boolean
+        default: false
+        required: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: avcrt-apk-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Assemble debug APK
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      ANDROID_COMPILE_SDK: ${{ github.event_name == 'workflow_dispatch' && inputs.compile_sdk || '34' }}
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v4
+
+      - name: Set up Gradle and cache dependencies
+        uses: gradle/actions/setup-gradle@v6
+
+      - name: Build APK and module
+        run: ./build_avcrtd.sh
+
+      - name: Prepare checksums
+        run: |
+          sha256sum \
+            app/build/outputs/apk/debug/app-debug.apk \
+            ksu-module/build/outputs/avcrt-module.zip \
+            | tee build-artifacts.sha256
+          {
+            echo '### AVCRT build artifacts'
+            echo '```text'
+            cat build-artifacts.sha256
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload APK, module, and checksums
+        uses: actions/upload-artifact@v6
+        with:
+          name: avcrt-debug-${{ github.sha }}
+          if-no-files-found: error
+          retention-days: 14
+          path: |
+            app/build/outputs/apk/debug/app-debug.apk
+            ksu-module/build/outputs/avcrt-module.zip
+            build-artifacts.sha256
+
+      - name: Send APK to Telegram
+        if: github.event_name == 'workflow_dispatch' && inputs.send_to_telegram
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          set -euo pipefail
+          if [[ -z "$TELEGRAM_BOT_TOKEN" || -z "$TELEGRAM_CHAT_ID" ]]; then
+            echo "Set TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID in repository Actions secrets." >&2
+            exit 1
+          fi
+
+          apk="app/build/outputs/apk/debug/app-debug.apk"
+          apk_size="$(stat -c '%s' "$apk")"
+          if (( apk_size > 50 * 1024 * 1024 )); then
+            echo "APK exceeds Telegram Bot API's 50 MB upload limit." >&2
+            exit 1
+          fi
+
+          response="$(curl --silent --show-error --fail-with-body \
+            --form-string "chat_id=$TELEGRAM_CHAT_ID" \
+            --form "document=@$apk;filename=avcrt-debug.apk;type=application/vnd.android.package-archive" \
+            "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendDocument")"
+          python3 -c 'import json,sys; d=json.loads(sys.argv[1]); sys.exit(0 if d.get("ok") else (print("Telegram rejected the APK upload.", file=sys.stderr) or 1))' "$response"

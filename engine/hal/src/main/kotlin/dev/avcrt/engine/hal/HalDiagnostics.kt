@@ -87,9 +87,9 @@ class HalDiagnostics @Inject constructor(
         } else {
             warn(
                 "Kernel patch",
-                "AVCRT Dec Mute not detected (or probe failed). Built-in codec clean-replace " +
-                    "requires this control on Nord; other routes and app hooks must be checked separately. " +
-                    "Do not flash a Nord kernel on another device.",
+                "AVCRT Dec Mute not detected (or probe failed). Cellular clean-replace requires " +
+                    "a matching device kernel patch and route validation. App-level Zygisk processing " +
+                    "is separate and does not require this control.",
             )
         }
     }

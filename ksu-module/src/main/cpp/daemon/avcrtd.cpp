@@ -39,12 +39,9 @@ using avcrt::Engine;
 
 namespace {
 
-// The lito/bolero sound card index. NOT a fixed 0: when a USB headset is plugged (esp. at boot)
-// it can take card 0 and push lito to card 1 (confirmed: with a Samsung USB-C headset, card 0 =
-// USB-Audio, card 1 = litomtpsndcard). All our voice controls + the "AVCRT Dec Mute" kcontrol +
-// the MM1/MM9 voice FE pcm devices live on the lito card, so we must find it BY NAME, else the
-// daemon opens the USB card, can't find the kcontrol, and disables the whole cellular path.
-// Resolved at startup by find_lito_card(); defaults to 0 if the scan fails.
+// Supported Qualcomm cards: litomtpsndcard (lito-mtp-snd-card) and
+// lahainayupikidp (lahaina-yupikidp-snd-card). Card numbering can shift when USB audio registers,
+// so resolve by card ID/description rather than assuming ALSA card 0.
 unsigned       g_card      = 0;
 int            g_usb_card  = -1;       // USB headset sound card index (can be 0!); -1 = none
 constexpr unsigned kCapDevice = 0;     // MultiMedia1 (pcm <card>,0) capture FE
@@ -61,8 +58,8 @@ constexpr int      kIdlePollMs = 400;  // how often we look for a call while idl
 
 // Capture/engage mode for the current call.
 //  MODE_BT = a Bluetooth (HFP/SCO) headset call — the uplink sources from INT_BT_SCO_TX
-//  (the BT chip <-> ADSP SCO bridge), handled like MODE_HEADSET (reroute to bolero + capture
-//  the freed mic + incall_music inject), but the BT mic is on the LITO card (not a USB card).
+//  (the BT chip <-> ADSP SCO bridge), handled like MODE_HEADSET (reroute to the Qualcomm codec +
+//  capture the freed mic + incall_music inject), but the BT mic is on the Qualcomm card.
 enum Mode { MODE_NONE = 0, MODE_BUILTIN = 1, MODE_HEADSET = 2, MODE_BT = 3 };
 
 // The incall_music inject path is structurally quieter than the real mic leg, so
@@ -88,11 +85,10 @@ void sleep_ms(int ms) {
     nanosleep(&ts, nullptr);
 }
 
-// Find the lito/bolero sound-card index by NAME in /proc/asound/cards (lines look like
-// " 1 [litomtpsndcard ]: lito-mtp-snd-ca - lito-mtp-snd-card"). Robust to a USB headset stealing
-// card 0. Returns the index, or 0 if not found (best-effort fallback). Called at startup; the
-// number is stable for the session (lito is built-in, always registered).
-unsigned find_lito_card() {
+// Find a supported Qualcomm audio card by ID or description in /proc/asound/cards.
+// The Lahaina/Yupik card configuration in this kernel tree uses Bolero TX macros.
+// Returns card 0 as a best-effort fallback for legacy devices if probing fails.
+unsigned find_audio_card() {
     FILE* f = fopen("/proc/asound/cards", "re");
     if (!f) return 0;
     char line[256];
@@ -102,7 +98,9 @@ unsigned find_lito_card() {
     while (fgets(line, sizeof(line), f)) {
         int n;
         if (sscanf(line, " %d [", &n) == 1) idx = n;   // a new card header line
-        if (idx >= 0 && (strstr(line, "litomtp") || strstr(line, "lito-mtp-snd"))) {
+        if (idx >= 0 && (strstr(line, "litomtp") || strstr(line, "lito-mtp-snd") ||
+                         strstr(line, "lahainayupikidp") ||
+                         strstr(line, "lahaina-yupikidp-snd-card"))) {
             found = (unsigned)idx; got = true; break;
         }
     }
@@ -130,20 +128,21 @@ int find_usb_card() {
     return found;
 }
 
-// (Re)resolve the lito + USB card indices BY NAME and (re)open g_mixer on lito if its index moved.
+// (Re)resolve the Qualcomm + USB card indices BY NAME and reopen its mixer if it moved.
 // CRITICAL: ALSA card indices RENUMBER across boot enumeration + audioserver restarts — e.g. with a
 // type-c headset plugged at BOOT the USB card grabs card 0 and lito becomes card 1; a hammer
 // (audioserver restart) can also re-enumerate. g_card/g_mixer used to be cached ONCE at startup, so
 // after a renumber the daemon wrote to the WRONG card (the USB Earphone) → voice controls no-op →
 // the type-c "changed voice + original from the phone bottom mic" chaos + churn. Call this whenever
-// the card set may have changed (startup, idle poll, after a hammer) so every op hits the real lito.
+// the card set may have changed (startup, idle poll, after a hammer) so each operation hits the
+// audio DSP card instead of a USB card.
 void resolve_cards() {
-    unsigned lito = find_lito_card();
-    if (!g_mixer || lito != g_card) {
+    unsigned audio_card = find_audio_card();
+    if (!g_mixer || audio_card != g_card) {
         if (g_mixer) { mixer_close(g_mixer); g_mixer = nullptr; }
-        g_card  = lito;
+        g_card  = audio_card;
         g_mixer = mixer_open(g_card);
-        fprintf(stderr, "[avcrtd] resolve_cards: lito=card %u (mixer %s)\n",
+        fprintf(stderr, "[avcrtd] resolve_cards: audio=card %u (mixer %s)\n",
                 g_card, g_mixer ? "ok" : "FAILED");
     }
     g_usb_card = find_usb_card();
@@ -346,7 +345,7 @@ Mode detect_mode(int& session) {
     if (mx_any_on("VoiceMMode1_Tx Mixer USB_AUDIO_TX_MMode1")) { session = 1; return MODE_HEADSET; }
     // Bluetooth (HFP/SCO) headset call: the uplink sources from INT_BT_SCO_TX. Detected like USB but
     // a BT device is NOT a USB sound card, so this is checked before the USB-card guard below and the
-    // BT flow (engage_bt) frees + captures the BT mic on the lito card.
+    // BT flow (engage_bt) frees + captures the BT mic on the Qualcomm audio card.
     if (mx_any_on("VoiceMMode2_Tx Mixer INT_BT_SCO_TX_MMode2")) { session = 2; return MODE_BT; }
     if (mx_any_on("VoiceMMode1_Tx Mixer INT_BT_SCO_TX_MMode1")) { session = 1; return MODE_BT; }
     // A USB-Audio CARD is present but the uplink isn't on USB yet (AHAL mid-transition / leftover
@@ -600,7 +599,7 @@ bool engage_headset(Session& s, int session) {
 // BT analogue of USB_AUDIO_TX). Same idea as engage_headset: reroute the uplink INT_BT_SCO_TX->bolero
 // (the modem reads the silent bolero placeholder), which should FREE the BT SCO mic; capture the freed
 // BT mic via MM1 <- INTERNAL_BT_SCO_TX, pitch (avcrt::Engine), inject via incall_music. The BT mic is on
-// the LITO card (not a separate USB card), so MM1 is reused SEQUENTIALLY: first as the BE-keeper to fire
+// the Qualcomm audio card (not a separate USB card), so MM1 is reused SEQUENTIALLY: first as the BE-keeper to fire
 // the reroute, then re-pointed to the BT mic.
 //
 // ⚠️ LIVE-VALIDATION PATH — needs a real BT (HFP) GSM call to confirm two unknowns the USB flow did NOT
@@ -870,7 +869,7 @@ AccCheck check_accessory(const Session& s) {
 // routing, then exit. Used by the supervisor on daemon exit (crash/SIGKILL) and
 // for manual recovery — no external tinymix dependency.
 int run_unmute() {
-    g_card = find_lito_card();
+    g_card = find_audio_card();
     g_mixer = mixer_open(g_card);
     if (!g_mixer) return 1;
     mx_set(kDecMuteCtl, 0);
@@ -940,7 +939,7 @@ int run_unmute() {
 // Probe: does the running kernel expose the "AVCRT Dec Mute" kcontrol (i.e. is the
 // AVCRT kernel patch flashed)? Exit 0 if present, 1 if not. Used by customize.sh.
 int run_probe_kcontrol() {
-    g_card = find_lito_card();
+    g_card = find_audio_card();
     struct mixer* m = mixer_open(g_card);
     if (!m) return 1;
     struct mixer_ctl* c = mixer_get_ctl_by_name(m, kDecMuteCtl);
@@ -951,7 +950,7 @@ int run_probe_kcontrol() {
 
 // Read-only probe: a missing mixer is an inspection error, not an absent control.
 int run_probe_cvp() {
-    struct mixer* m = mixer_open(find_lito_card());
+    struct mixer* m = mixer_open(find_audio_card());
     if (!m) return 2;
     const bool present = mixer_get_ctl_by_name(m, kCvpRebuildCtl) != nullptr;
     mixer_close(m);
@@ -1180,7 +1179,7 @@ void cvp_rebuild() {
 //    rebuilds the call routing cleanly → idle re-engages the codec flow). Proven for minijack.
 void disengage_and_recover(Session& s) {
     bool ext_gone = (s.mode == MODE_HEADSET || s.mode == MODE_BT);
-    resolve_cards();            // operate on the CURRENT lito card (indices may have moved)
+    resolve_cards();            // operate on the current Qualcomm card (indices may have moved)
     disengage(s, ext_gone);
     if (g_cvp_rebuild_present) {
         // AVCRT UNIFIED KERNEL: flush any stale CVP Tx latch with an in-kernel vocproc rebuild — no
@@ -1236,7 +1235,7 @@ int main(int argc, char** argv) {
 
     resolve_cards();   // resolve lito + USB by name, open g_mixer (re-resolved on every renumber)
     if (!g_mixer) { fprintf(stderr, "[avcrtd] mixer_open failed\n"); return 1; }
-    fprintf(stderr, "[avcrtd] using lito card %u (usb card %d)\n", g_card, g_usb_card);
+    fprintf(stderr, "[avcrtd] using audio card %u (usb card %d)\n", g_card, g_usb_card);
 
     // GATING (per-flow, NOT a hard cellular kill-switch):
     //  - BUILT-IN mic GSM clean-replace needs the "AVCRT Dec Mute" kcontrol (AVCRT kernel patch).
@@ -1457,8 +1456,8 @@ int main(int argc, char** argv) {
         bool on = engine_enabled(cfg, dc);
         if (!on) { sleep_ms(kIdlePollMs); continue; }
         // Re-resolve cards every idle poll (lito + USB by name, reopen g_mixer if an index moved at
-        // boot/after a hammer) BEFORE picking the flow → engage always operates on the real lito card
-        // and the real USB card. This fixes the type-c-at-boot card-swap (USB=card0, lito=card1).
+        // boot/after a hammer) BEFORE picking the flow → engage always operates on the real audio
+        // card and USB card. This handles card renumbering when USB is present at boot.
         resolve_cards();
         int session = 0;
         Mode m = detect_mode(session);
